@@ -4,6 +4,7 @@ export async function onRequest(context) {
 
   const code = url.searchParams.get("code");
   const type = url.searchParams.get("type");
+  const date = url.searchParams.get("date"); // ✅ 新增
 
   if (!code || !type) {
     return jsonResponse({ detail: "Missing code or type" }, 400);
@@ -36,6 +37,24 @@ export async function onRequest(context) {
 
       return jsonResponse(
         { detail: `Intraday data not found for ${code}` },
+        404
+      );
+    }
+    // ==============================
+    // ✅ specified intraday（新增）
+    // ==============================
+    else if (type === "specifiedIntraday") {
+      if (!date) {
+        return jsonResponse({ detail: "Missing date parameter" }, 400);
+      }
+    
+      const eastmoney = await getEastmoneyIntradayByDate(code, date);
+      if (eastmoney) {
+        return jsonResponse(eastmoney);
+      }
+    
+      return jsonResponse(
+        { detail: `Intraday data not found for ${code} on ${date}` },
         404
       );
     }
@@ -216,6 +235,82 @@ async function getEastmoneyIntraday(code) {
     return result;
   } catch (e) {
     console.log("Eastmoney intraday error:", e);
+    return null;
+  }
+}
+
+// ==============================
+// ✅ Eastmoney 指定日期分时（新增）
+// ==============================
+async function getEastmoneyIntradayByDate(code, targetDate) {
+  try {
+    const codeUpper = code.toUpperCase();
+
+    let secid;
+
+    if (codeUpper.startsWith("HK")) {
+      const pure = codeUpper.replace("HK", "");
+      secid = `116.${pure}`;
+    } else if (/^(60|68|51|56|58|55|900)/.test(code)) {
+      secid = `1.${code}`;
+    } else if (/^(00|30|15|200)/.test(code)) {
+      secid = `0.${code}`;
+    } else {
+      return null;
+    }
+
+    // ✅ 关键：拉多天数据（否则拿不到历史）
+    const url = `https://push2his.eastmoney.com/api/qt/stock/trends2/get?secid=${secid}&fields1=f1,f2,f3,f4,f5,f6,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58&ut=fa5fd1943c7b386f172d6893dbfba10b&ndays=5`;
+
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+
+    const json = await res.json();
+    const trends = json?.data?.trends;
+
+    if (!trends) return null;
+
+    let cumulativeAmount = 0;
+    let cumulativeVolume = 0;
+
+    const result = [];
+
+    for (const item of trends) {
+      const parts = item.split(",");
+
+      const dt = parts[0];
+      const price = parseFloat(parts[2]);
+      const volume = parseFloat(parts[5]);
+      const amount = parseFloat(parts[6]);
+
+      const [dateStr, timeStrRaw] = dt.split(" ");
+
+      // ✅ 关键：过滤指定日期
+      if (dateStr !== targetDate) continue;
+
+      cumulativeAmount += amount;
+      cumulativeVolume += volume > 0 ? volume : 0;
+
+      const avgPrice = cumulativeVolume
+        ? Number((cumulativeAmount / cumulativeVolume).toFixed(6))
+        : price;
+
+      const timeStr =
+        timeStrRaw.length === 8 ? timeStrRaw : timeStrRaw + ":00";
+
+      result.push({
+        date: dateStr,
+        time: timeStr,
+        price: price,
+        avg_price: avgPrice,
+        volume: Number(volume),
+      });
+    }
+
+    return result.length ? result : null;
+  } catch (e) {
+    console.log("Eastmoney specified intraday error:", e);
     return null;
   }
 }
